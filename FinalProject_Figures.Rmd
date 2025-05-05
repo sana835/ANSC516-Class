@@ -1,0 +1,905 @@
+---
+title: "ANSC516_FinalProject"
+author: "Sana Mohammad"
+date: "2025-04-22"
+output: html_document
+---
+
+# ANSC516- Final Project
+
+The following R Markdown contains the code used in conjunction with qiime2 outputs from my slurm files to create figures used in my final project.
+
+# Setup
+
+Clean the environment and set working directory if needed.
+
+```{r}
+rm(list = ls ())
+getwd()
+```
+
+## Packages
+
+```{r, message=F}
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#install.packages("BiocManager")
+#BiocManager::install("phyloseq")
+
+library(tidyverse)
+library(qiime2R)
+library(ggpubr)
+library(readxl)
+library(dplyr)
+library(devtools)
+library(vegan)
+```
+
+## Loading Data
+
+### Metadata
+
+```{r}
+meta <- read_excel("SraRunTable.xlsx")
+meta <- meta %>%
+  select(id, Host, isolation_source)
+head(meta)
+```
+
+Renaming factors in metadata
+
+```{r}
+meta <- meta %>% 
+  mutate(Host = case_when(
+  Host == "not applicable" ~    "na",
+  Host == "Solanum lycopersicum cv. Hawaii7996 x S. pimpinellifolium West Virginia700 RIL line" ~    "HA7996 x WV700 RIL line",
+  Host == "S. lycopersicum cv. Hawaii7996 x S. pimpinellifolium West Virginia700 RIL line" ~    "HA7996 x WV700 RIL line",
+  Host == "S. lycopersicum cv. Pearson" ~    "Pearson",
+  Host == "Never-ripe (Nr) mutant in S. lycopersicum cv. Pearson background" ~    "Nr (Pearson)",
+  Host == "NahG transgenic mutant in S. lycopersicum cv. Money Maker background" ~    "NahG (MM)",
+  Host == "ACD transgenic mutant in S. lycopersicum cv. UC82B background" ~    "ACD (UC82B)",
+  Host == "S. lycopersicum cv. Bonnie Best" ~    "Bonnie Best",
+  Host == "S. lycopersicum cv. Castle Mart II" ~    "CastleMart",
+  Host == "Bulk soil from hormone mutant pots" ~    "Bulk Soil",
+  Host == "Bulk soil from RIL pots" ~    "Bulk Soil",
+  Host == "defenseless-1 (def1) mutant in S. lycopersicum cv. Castle Mart II background" ~    "def1 (CM)",
+  Host == "S. lycopersicum cv. Hawaii7996" ~    "Hawaii7996",
+  Host == "S. lycopersicum cv. Money Maker" ~    "Money Maker",
+  Host == "S. lycopersicum cv. UC82B" ~    "UC82B",
+  Host == "S. pimpinellifolium accession LA2093" ~    "LA2093",
+  Host == "S. pimpinellifolium West Virginia700" ~    "West Virginia700",
+  TRUE                      ~ "other"
+)) %>%
+  mutate(isolation_source = case_when(
+    isolation_source == "bulk soil from pots of natural soil mixed with potting mix\\, in greenhouse" ~ "Bulk Soil",
+    isolation_source == "root endosphere of greenhouse grown plants in natural soil mixed with potting mix" ~ "Root Endosphere",
+    isolation_source == "root rhizosphere of greenhouse grown plants in natural soil mixed with potting mix" ~ "Root Rhizosphere",
+    isolation_source == "not applicable" ~ "na",
+  ))
+
+head(meta)
+```
+
+### Alpha Diversity vectors
+
+```{r}
+evenness = read_qza("core-metrics-results/evenness_vector.qza")
+evenness <-evenness$data %>% rownames_to_column("id")
+
+observed_features = read_qza("core-metrics-results/observed_features_vector.qza")
+observed_features<-observed_features$data %>% rownames_to_column("id")
+
+shannon = read_qza("core-metrics-results/shannon_vector.qza")
+shannon<-shannon$data %>% rownames_to_column("id")
+
+faith_pd = read_qza("core-metrics-results/faith_pd_vector.qza")
+faith_pd<-faith_pd$data %>% rownames_to_column("id")
+
+#simpson = read_qza("core-metrics-results/simpson_vector.qza")
+#simpson<-simpson$data %>% rownames_to_column("id")
+
+chao = read_qza("core-metrics-results/chao1_vector.qza")
+chao<-chao$data %>% rownames_to_column("id")
+```
+
+### Beta Diversity Results
+
+```{r}
+bc_PCoA<-read_qza("core-metrics-results/bray_curtis_pcoa_results.qza")
+wUF <- read_qza("core-metrics-results/weighted_unifrac_pcoa_results.qza")
+UF <- read_qza("core-metrics-results/unweighted_unifrac_pcoa_results.qza")
+jacc <- read_qza("core-metrics-results/jaccard_pcoa_results.qza")
+```
+
+# Alpha Diversity
+
+Merging alpha diversity results with the metadata
+
+```{r}
+observed_features$observed_features <- as.numeric(observed_features$observed_features)
+
+str(observed_features)
+```
+
+```{r}
+alpha_diversity = merge(x=faith_pd, y=evenness, by.x = "id", by.y = "id")
+alpha_diversity = merge(alpha_diversity, observed_features, by.x = "id", by.y = "id")
+alpha_diversity = merge(alpha_diversity, shannon, by.x = "id", by.y = "id")
+
+meta = merge(meta, alpha_diversity, by.x = "id", by.y = "id")
+row.names(meta) <- meta$id
+
+head(meta)
+```
+
+## Normality Testing
+
+### Shannon
+
+```{r}
+ggqqplot(alpha_diversity$shannon_entropy)
+shapiro.test(alpha_diversity$shannon_entropy)
+```
+
+Not normal
+
+### Faith PD
+
+```{r}
+ggqqplot(alpha_diversity$faith_pd)
+shapiro.test(alpha_diversity$faith_pd)
+```
+
+Not normal
+
+### Evenness
+
+```{r}
+ggqqplot(alpha_diversity$pielou_evenness)
+shapiro.test(alpha_diversity$pielou_evenness)
+```
+
+Not normal
+
+### Observed Features
+
+```{r}
+ggqqplot(alpha_diversity$observed_features)
+shapiro.test(alpha_diversity$observed_features)
+```
+
+Not normal
+
+None of the alpha diversity metrics are normal, so I will use non-parametric statistical tests (Kruskal-Wallis) moving forward.
+
+## Plots
+
+### Shannon
+
+```{r}
+plot_shan <- meta %>%
+  filter(!Host == "na") %>%
+  group_by(Host, isolation_source) %>%
+  arrange(shannon_entropy) %>%
+ggplot(aes(x=shannon_entropy, y=isolation_source, color=Host))+
+  #facet_wrap(~isolation_source, ncol=3) +
+  geom_boxplot(position=position_dodge(1))+
+  theme_bw()+
+  xlab("Shannon Entropy")+
+  ylab("")+
+  ggtitle("Shannon Index")+
+  theme(plot.title=element_text(hjust=0.5),
+        aspect.ratio = 1
+        #legend.position="none"
+        )+
+  coord_flip()
+  
+
+#ggsave("shannon.tiff")
+```
+
+### Faith PD
+
+```{r}
+plot_fpd <- meta %>%
+  filter(!Host == "na") %>%
+  group_by(Host, isolation_source) %>%
+  arrange(faith_pd) %>%
+ggplot(aes(x=faith_pd, y=isolation_source, color=Host))+
+  #facet_wrap(~isolation_source, ncol=3) +
+  geom_boxplot(position=position_dodge(1))+
+  theme_bw()+
+  xlab("Faith PD")+
+  ylab("")+
+  ggtitle("Faith Phylogenetic Diversity")+
+  theme(plot.title=element_text(hjust=0.5),
+        aspect.ratio = 1
+        #legend.position="none"
+        )+
+  coord_flip()
+
+#ggsave("faithPD.tiff")
+```
+
+### Evenness
+
+```{r}
+plot_even <- meta %>%
+  filter(!Host == "na") %>%
+  group_by(Host, isolation_source) %>%
+  arrange(pielou_evenness) %>%
+ggplot(aes(x=pielou_evenness, y=isolation_source, color=Host))+
+  #facet_wrap(~isolation_source, ncol=3) +
+  geom_boxplot(position=position_dodge(1))+
+  theme_bw()+
+  xlab("Evenness")+
+  ylab("")+
+  ggtitle("Pielou's Evenness")+
+  theme(plot.title=element_text(hjust=0.5),
+        aspect.ratio = 1
+        #legend.position="none"
+        )+
+  coord_flip()
+
+#ggsave("evenness.tiff")
+```
+
+### Observed Features
+
+```{r}
+plot_obs <- meta %>%
+  filter(!Host == "na") %>%
+  group_by(Host, isolation_source) %>%
+  arrange(observed_features) %>%
+ggplot(aes(x=observed_features, y=isolation_source, color=Host))+
+  #facet_wrap(~isolation_source, ncol=3) +
+  geom_boxplot(position=position_dodge(1))+
+  theme_bw()+
+  xlab("Observed Features")+
+  ylab("")+
+  ggtitle("Observed Features")+
+  theme(plot.title=element_text(hjust=0.5),
+        aspect.ratio = 1
+        #legend.position="none"
+        )+
+  coord_flip()
+
+#ggsave("obsFeat.tiff")
+```
+
+### Arranging Figure
+
+```{r}
+ggarrange(plot_shan, plot_fpd, plot_even, plot_obs, ncol=2, nrow=2, common.legend=T, legend="right")
+
+ggsave("alpha.tiff")
+```
+
+## Statistical Analysis
+
+```{r}
+endo <- meta %>%
+  filter(isolation_source=="Root Endosphere")
+
+rhizo <- meta %>%
+  filter(isolation_source=="Root Rhizosphere")
+```
+
+### Endosphere
+
+```{r}
+kruskal.test(shannon_entropy ~ Host, data=endo)
+```
+
+```{r}
+kruskal.test(faith_pd ~ Host, data=endo)
+```
+
+```{r}
+kruskal.test(pielou_evenness ~ Host, data=endo)
+```
+
+```{r}
+kruskal.test(observed_features ~ Host, data=endo)
+```
+
+### Rhizosphere
+
+```{r}
+kruskal.test(shannon_entropy ~ Host, data=rhizo)
+```
+
+```{r}
+kruskal.test(faith_pd ~ Host, data=rhizo)
+```
+
+```{r}
+kruskal.test(pielou_evenness ~ Host, data=rhizo)
+```
+
+```{r}
+kruskal.test(observed_features ~ Host, data=rhizo)
+```
+
+# Beta Diversity
+
+## Ordination Plots
+
+Merging results with the metadata
+
+```{r}
+bc_meta <- bc_PCoA$data$Vectors %>%
+  select(SampleID, PC1, PC2, PC3) %>%
+  inner_join(meta, by = c("SampleID" = "id")) %>%
+  filter(!Host=="na")
+
+jacc_meta <- jacc$data$Vectors %>%   
+  select(SampleID, PC1, PC2, PC3) %>%   
+  inner_join(meta, by = c("SampleID" = "id")) %>%   
+  filter(!Host=="na")
+
+wUF_meta <- wUF$data$Vectors %>%   
+  select(SampleID, PC1, PC2, PC3) %>%   
+  inner_join(meta, by = c("SampleID" = "id")) %>%   
+  filter(!Host=="na")
+
+UF_meta <- UF$data$Vectors %>%   
+  select(SampleID, PC1, PC2, PC3) %>%   
+  inner_join(meta, by = c("SampleID" = "id")) %>%   
+  filter(!Host=="na")
+```
+
+### Bray-Curtis
+
+```{r}
+brayPlot <- ggplot(bc_meta, aes(x=PC1, y=PC2, 
+                                color=Host, shape=isolation_source)) +
+  geom_point(size = 2,
+             alpha= 1) +
+  xlab(paste0("PC1 (", round(100*bc_PCoA$data$ProportionExplained[1], digits = 2), "%)")) +
+  ylab(paste0("PC2 (", round(100*bc_PCoA$data$ProportionExplained[2], digits = 2), "%)")) +
+  scale_color_discrete(name = "Host")+
+  scale_shape_manual(values=c(3,16,17),
+                     name="Isolation Source")+
+  ggtitle("Bray-Curtis")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust=0.5))
+  
+brayPlot
+```
+
+#### Jaccard
+
+```{r}
+jaccPlot <- ggplot(jacc_meta, aes(x=PC1, y=PC2, 
+                                color=Host, shape=isolation_source)) +
+  geom_point(size = 2,
+             alpha= 1) +
+  xlab(paste0("PC1 (", round(100*bc_PCoA$data$ProportionExplained[1], digits = 2), "%)")) +
+  ylab(paste0("PC2 (", round(100*bc_PCoA$data$ProportionExplained[2], digits = 2), "%)")) +
+  scale_color_discrete(name = "Host")+
+  scale_shape_manual(values=c(3,16,17),
+                     name="Isolation Source")+
+  ggtitle("Jaccard")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust=0.5))
+  
+jaccPlot
+```
+
+#### Weighted Unifrac
+
+```{r}
+weighPlot <- ggplot(wUF_meta, aes(x=PC1, y=PC2, 
+                                color=Host, shape=isolation_source)) +
+  geom_point(size = 2,
+             alpha= 1) +
+  xlab(paste0("PC1 (", round(100*bc_PCoA$data$ProportionExplained[1], digits = 2), "%)")) +
+  ylab(paste0("PC2 (", round(100*bc_PCoA$data$ProportionExplained[2], digits = 2), "%)")) +
+  scale_color_discrete(name = "Host")+
+  scale_shape_manual(values=c(3,16,17),
+                     name="Isolation Source")+
+  ggtitle("Weighted Unifrac")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust=0.5))
+  
+weighPlot
+```
+
+#### Unweighted Unifrac
+
+```{r}
+unweightPlot <- ggplot(UF_meta, aes(x=PC1, y=PC2, 
+                                color=Host, shape=isolation_source)) +
+  geom_point(size = 2,
+             alpha= 1) +
+  xlab(paste0("PC1 (", round(100*bc_PCoA$data$ProportionExplained[1], digits = 2), "%)")) +
+  ylab(paste0("PC2 (", round(100*bc_PCoA$data$ProportionExplained[2], digits = 2), "%)")) +
+  scale_color_discrete(name = "Host")+
+  scale_shape_manual(values=c(3,16,17),
+                     name="Isolation Source")+
+  ggtitle("Unweighted Unifrac")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust=0.5))
+  
+unweightPlot
+```
+
+#### Arranging Figure
+
+```{r}
+ggarrange(brayPlot, jaccPlot, weighPlot, unweightPlot, 
+          ncol=2, nrow=2, 
+          common.legend=T, legend="right")
+```
+
+## Statistics
+
+### Bray-Curtis
+
+Loading distance matrix and merging with metadata
+
+```{r}
+bc_dist_mat<-read_qza("core-metrics-results/bray_curtis_distance_matrix.qza")
+bc_dm <- as.matrix(bc_dist_mat$data) 
+rownames(bc_dm) == meta$id ## all these values need to be "TRUE"
+```
+
+```{r}
+metadata_sub <- meta[match(rownames(bc_dm),meta$id),]
+rownames(bc_dm) == metadata_sub$id ## all these values need to be "TRUE"
+```
+
+```{r}
+PERMANOVA_bray <- adonis2(bc_dm ~ Host*isolation_source, data = metadata_sub)
+
+write.table(PERMANOVA_bray,"output/bray_Adonis_overall.csv",sep=",", row.names = TRUE) 
+```
+
+### Jaccard
+
+```{r}
+jacc_dist_mat<-read_qza("core-metrics-results/jaccard_distance_matrix.qza")
+jacc_dm <- as.matrix(jacc_dist_mat$data) 
+rownames(jacc_dm) == meta$id
+
+metadata_subj <- meta[match(rownames(jacc_dm),meta$id),]
+rownames(jacc_dm) == metadata_subj$id
+
+PERMANOVA_jacc <- adonis2(jacc_dm ~ Host*isolation_source, data = metadata_subj)
+
+write.table(PERMANOVA_jacc,"output/jaccard_Adonis_overall.csv",sep=",", row.names = TRUE) 
+```
+
+### Weighted Unifrac
+
+```{r}
+wu_dist_mat<-read_qza("core-metrics-results/weighted_unifrac_distance_matrix.qza")
+wu_dm <- as.matrix(wu_dist_mat$data) 
+rownames(wu_dm) == meta$id
+
+metadata_subw <- meta[match(rownames(wu_dm),meta$id),]
+rownames(wu_dm) == metadata_subw$id
+
+PERMANOVA_wu <- adonis2(wu_dm ~ Host*isolation_source, data = metadata_subw)
+
+write.table(PERMANOVA_wu,"output/wu_Adonis_overall.csv",sep=",", row.names = TRUE) 
+```
+
+### Unweighted Unifrac
+
+```{r}
+u_dist_mat<-read_qza("core-metrics-results/unweighted_unifrac_distance_matrix.qza")
+u_dm <- as.matrix(u_dist_mat$data) 
+rownames(u_dm) == meta$id
+
+metadata_subu <- meta[match(rownames(u_dm),meta$id),]
+rownames(u_dm) == metadata_subu$id
+
+PERMANOVA_u <- adonis2(u_dm ~ Host*isolation_source, data = metadata_subu)
+
+write.table(PERMANOVA_u,"output/u_Adonis_overall.csv",sep=",", row.names = TRUE)
+```
+
+### Pairwise PERMANOVA
+
+Creating pairwise function
+
+```{r}
+pairwise.adonis2 <- function(x, data, strata = NULL, nperm=999, ... ) {
+  
+  #describe parent call function 
+  ststri <- ifelse(is.null(strata),'Null',strata)
+  fostri <- as.character(x)
+  #list to store results
+  
+  #copy model formula
+  x1 <- x
+  # extract left hand side of formula
+  lhs <- x1[[2]]
+  # extract factors on right hand side of formula 
+  rhs <- x1[[3]]
+  # create model.frame matrix  
+  x1[[2]] <- NULL   
+  rhs.frame <- model.frame(x1, data, drop.unused.levels = TRUE) 
+  
+  # create unique pairwise combination of factors 
+  co <- combn(unique(as.character(rhs.frame[,1])),2)
+  
+  # create names vector   
+  nameres <- c('parent_call')
+  for (elem in 1:ncol(co)){
+    nameres <- c(nameres,paste(co[1,elem],co[2,elem],sep='_vs_'))
+  }
+  #create results list  
+  res <- vector(mode="list", length=length(nameres))
+  names(res) <- nameres
+  
+  #add parent call to res 
+  res['parent_call'] <- list(paste(fostri[2],fostri[1],fostri[3],', strata =',ststri, ', permutations',nperm ))
+  
+  
+  #start iteration trough pairwise combination of factors  
+  for(elem in 1:ncol(co)){
+    
+    #reduce model elements  
+    if(inherits(eval(lhs),'dist')){	
+      xred <- as.dist(as.matrix(eval(lhs))[rhs.frame[,1] %in% c(co[1,elem],co[2,elem]),
+                                           rhs.frame[,1] %in% c(co[1,elem],co[2,elem])])
+    }else{
+      xred <- eval(lhs)[rhs.frame[,1] %in% c(co[1,elem],co[2,elem]),]
+    }
+    
+    mdat1 <-  data[rhs.frame[,1] %in% c(co[1,elem],co[2,elem]),] 
+    
+    # redefine formula
+    if(length(rhs) == 1){
+      xnew <- as.formula(paste('xred',as.character(rhs),sep='~'))	
+    }else{
+      xnew <- as.formula(paste('xred' , 
+                               paste(rhs[-1],collapse= as.character(rhs[1])),
+                               sep='~'))}
+    
+    #pass new formula to adonis
+    if(is.null(strata)){
+      ad <- adonis2(xnew,data=mdat1, ... )
+    }else{
+      perm <- how(nperm = nperm)
+      setBlocks(perm) <- with(mdat1, mdat1[,ststri])
+      ad <- adonis2(xnew,data=mdat1,permutations = perm, ... )}
+    
+    res[nameres[elem+1]] <- list(ad[1:5])
+  }
+  #names(res) <- names  
+  class(res) <- c("pwadstrata", "list")
+  return(res)
+} 
+```
+
+```{r}
+bray_pair <- pairwise.adonis2(bc_dm ~ isolation_source, data = metadata_sub)
+
+#write.table(bray_pair,"output/bray_Adonis_pairwise.csv",sep=",",
+ #           row.names = T) 
+
+bray_pair
+```
+
+```{r}
+jacc_pair <- pairwise.adonis2(jacc_dm ~ isolation_source, data = metadata_subj)
+
+jacc_pair
+```
+
+```{r}
+wu_pair <- pairwise.adonis2(wu_dm ~ isolation_source, data = metadata_subw)
+
+wu_pair
+```
+
+```{r}
+u_pair <- pairwise.adonis2(u_dm ~ isolation_source, data = metadata_subu)
+
+u_pair
+```
+
+# Taxonomy
+
+```{r}
+#library(qiime2R)
+library(phyloseq)
+library(zoo)
+#library(tidyverse)
+library(glue)
+```
+
+```{r}
+getwd()
+```
+
+Creating a directory for the output.
+
+```{r}
+dir.create("output/taxa")
+```
+
+Reading in taxonomy.qza file from Qiime2
+
+```{r}
+taxonomy<-read_qza("taxonomy.qza")
+head(taxonomy$data)
+```
+
+```{r}
+tax.clean<-parse_taxonomy(taxonomy$data)
+head(tax.clean)
+```
+
+Making NA's + ASVs that are unclassified at any level classified as the lowest taxonomic level for which there is a classification.
+
+```{r}
+tax.clean[is.na(tax.clean)] <- ""
+for (i in 1:nrow(tax.clean)){
+  if (tax.clean[i,2] == ""){
+    kingdom <- paste("Kingdom_", tax.clean[i,1], sep = "")
+    tax.clean[i, 2:7] <- kingdom
+  } else if (tax.clean[i,3] == ""){
+    phylum <- paste("Phylum_", tax.clean[i,2], sep = "")
+    tax.clean[i, 3:7] <- phylum
+  } else if (tax.clean[i,4] == ""){
+    class <- paste("Class_", tax.clean[i,3], sep = "")
+    tax.clean[i, 4:7] <- class
+  } else if (tax.clean[i,5] == ""){
+    order <- paste("Order_", tax.clean[i,4], sep = "")
+    tax.clean[i, 5:7] <- order
+  } else if (tax.clean[i,6] == ""){
+    family <- paste("Family_", tax.clean[i,5], sep = "")
+    tax.clean[i, 6:7] <- family
+  } else if (tax.clean[i,7] == ""){
+    tax.clean$Species[i] <- paste("Genus",tax.clean$Genus[i], sep = "_")
+  }
+}
+```
+
+## Taxa Bar Plot
+
+Importing tree data
+
+```{r, eval=FALSE}
+physeq <- qza_to_phyloseq(
+  features="core-metrics-results/rarefied_table.qza",
+  tree="rooted-tree.qza",
+  taxonomy = "taxonomy.qza",
+  metadata = "SraRunTable.txt"
+)
+
+metadata <-read_excel("SraRunTable.xlsx")
+head(metadata)
+metadata <- metadata[-1,]
+
+#rownames(metadata) <- metadata[ ,1]
+
+#metadata[,1]
+
+rownames(metadata) <- metadata$id
+
+rownames(metadata)
+
+metadata <- meta
+```
+
+```{r eval=F}
+physeq_otu_table <- data.frame(otu_table(physeq), check.names = F)
+
+tax.clean = tax.clean[row.names(tax.clean) %in% rownames(physeq_otu_table),]
+metadata.filtered = metadata[row.names(metadata) %in% colnames(physeq_otu_table),]
+
+OTU.physeq = otu_table(as.matrix(physeq_otu_table), taxa_are_rows=TRUE)
+
+tax.physeq = tax_table(as.matrix(tax.clean))    
+meta.physeq = sample_data(metadata.filtered)
+
+physeq_bar_plot = phyloseq(OTU.physeq, tax.physeq, meta.physeq)
+
+view(OTU.physeq)
+view(tax.physeq)
+view(meta.physeq)
+view(physeq_bar_plot)
+```
+
+```{r}
+my_colors <- c(
+  '#a6cee3','#1f78b4','#b2df8a','#33a02c','#fb9a99','#e31a1c',
+  '#fdbf6f','#ff7f00','#cab2d6','#6a3d9a','#ffff99','#b15928', 
+  "#CBD588", "#5F7FC7", "orange","#DA5724", "#508578", "#CD9BCD",
+  "#AD6F3B", "#673770","#D14285", "#652926", "#C84248", 
+  "#8569D5", "#5E738F","#D1A33D", "#8A7C64", "#599861", "gray", "black"
+)
+```
+
+```{r, eval=F}
+my_level <- c("Phylum", "Family", "Genus")
+my_column <- "isolation_source"
+```
+
+```{r,eval=F}
+rm(taxa.summary)
+
+abund_filter <- 0.05  # Our abundance threshold
+ml ="Genus"
+
+
+```
+
+```{r, eval=F}
+for(ml in my_level){
+  print(ml)
+  
+  taxa.summary <- physeq_bar_plot %>%
+    tax_glom(taxrank = ml, NArm = FALSE) %>%  # agglomerate at `ml` level
+    transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+    psmelt()  %>%                               # Melt to long format
+    group_by(get(my_column), get(ml)) %>%
+    summarise(Abundance.average=mean(Abundance)) 
+  taxa.summary <- as.data.frame(taxa.summary)
+  colnames(taxa.summary)[1] <- my_column
+  colnames(taxa.summary)[2] <- ml
+  
+  physeq.taxa.max <- taxa.summary %>% 
+    group_by(get(ml)) %>%
+    summarise(overall.max=max(Abundance.average))
+  
+  physeq.taxa.max <- as.data.frame(physeq.taxa.max)
+  colnames(physeq.taxa.max)[1] <- ml
+  
+  # merging the phyla means with the metadata #
+  physeq_meta <- merge(taxa.summary, physeq.taxa.max)
+  
+  
+  physeq_meta_filtered <- filter(physeq_meta, overall.max>abund_filter)
+  #str(physeq_meta_filtered)
+  
+  physeq_meta_filtered$body.site.ord = factor(physeq_meta_filtered$body.site, c("left palm", "right palm", "gut", "tongue"))
+  
+  # Plot 
+  ggplot(physeq_meta_filtered, aes(x = get(my_column), y = Abundance.average, fill = get(ml))) + 
+    #facet_grid(.~LitterTreatment) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = my_colors) +
+    # Remove x axis title
+    #theme(axis.title.x = element_blank()) + 
+    ylim(c(0,1)) +
+    guides(fill = guide_legend(reverse = F, keywidth = .5, keyheight = .5, ncol = 1)) +
+    theme(legend.text=element_text(size=8)) +
+    #theme(legend.position="bottom") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+    theme(legend.title = element_blank()) +
+    ylab("Relative Abundance") +
+    xlab(my_column) +
+    ggtitle(paste0(ml, " (>", abund_filter * 100,"%) in at least 1 sample")) 
+  ggsave(paste0("output/taxa/", ml, "BarPlot_", my_column, ".png"), height = 5, width = 4)
+}
+
+```
+
+# Cooccurance
+
+```{r}
+library(Hmisc)
+library(plyr)
+library(reshape2)
+```
+
+```{r}
+ASVs <- read_qza("table.qza")
+ASV_table <- as.data.frame(ASVs$data)
+```
+
+```{r}
+ASV_table$ASVnos <- paste0("ASV", 1:nrow(ASV_table))
+ASV_table$ASVstring <- rownames(ASV_table)
+rownames(ASV_table) <- ASV_table$ASVnos
+ASVkey <- ASV_table[, (ncol(ASV_table)-1):ncol(ASV_table)]
+ASV_table <- ASV_table[,-(ncol(ASV_table)-1):-ncol(ASV_table)]
+```
+
+```{r}
+dataset <- as.data.frame(t(ASV_table))
+```
+
+```{r}
+head(dataset[,1:10])
+
+#metadata<-read_excel("SraRunTable.xlsx")
+#metadata <- metadata[-1,]
+#str(metadata)
+#colnames(metadata)[3] = "Host"
+metadata <- meta
+
+dataset <- merge(metadata, dataset, by.x = "id", by.y = 0)
+treatments<-as.vector(unique(dataset$Host))
+datasetn<-dataset
+datasetn[datasetn==0]<-NA
+```
+
+```{r}
+summary(metadata$isolation_source)
+```
+
+```{r}
+num_metadata_columns <- ncol(metadata)
+
+q_cutoff <- 0.05
+
+final_results<-data.frame()
+
+my_column <- "isolation_source"
+n1 <- 4
+n2 <- 4
+n3 <- 4
+n4 <- 4
+```
+
+```{r}
+for(i in 1:length(treatments)){
+  #subset the data for a particular treatment YOU MUST ENTER THE HEADER OF THE COLUMN THAT HAS THE DIFFERENT TREATMENTS IN THIS CASE “Foaming_Status”
+  print(paste("reading ",treatments[i],sep=""))
+  temp<-subset(dataset, get(my_column)==treatments[i])
+  tempn<-subset(datasetn, get(my_column)==treatments[i])
+  print(paste("finished reading ",treatments[i],sep=""))
+  # making an object that has all the results in it (both rho and P values)
+  results<-rcorr(as.matrix(temp[,-c(1:num_metadata_columns)]),type="spearman") ## use the "-c" parameter to remove metadata columns
+  resultsn<-rcorr(as.matrix(tempn[,-c(1:num_metadata_columns)]),type="spearman")
+  
+  #make two seperate objects for p-value and correlation coefficients
+  rhos<-results$r
+  ps<-results$P
+  ns<-resultsn$n
+  # going to melt these objects to 'long form' where the first two columns make up the pairs of OTUs, I am also removing NA's as they are self-comparisons, not enough data, other bad stuff
+  ps_melt<-na.omit(melt(ps))
+  #creating a qvalue based on FDR
+  ps_melt$qval<-p.adjust(ps_melt$value, method = "BH")
+  #making column names more relevant
+  
+  names(ps_melt)[3]<-"pval"
+  # if you are of the opinion that it is a good idea to subset your network based on adjusted P-values (qval in this case), you can then subset here
+  ps_sub<-subset(ps_melt, qval < q_cutoff)
+  
+  # now melting the rhos, note the similarity between ps_melt and rhos_melt
+  rhos_melt<-na.omit(melt(rhos))
+  names(rhos_melt)[3]<-"rho"
+  
+  # now melting the ns
+  ns_melt<-(melt(ns))
+  names(ns_melt)[3]<-"n"
+  
+  #merging together and remove negative rhos
+  merged<-merge(ps_sub,rhos_melt,by=c("Var1","Var2"))
+  if (treatments[i]==treatments[1]) {
+    merged<-merge(merged,subset(ns_melt, n > n1),by=c("Var1","Var2"))
+  }   else if (treatments[i]==treatments[2]) {
+    merged<-merge(merged,subset(ns_melt, n > n2),by=c("Var1","Var2"))
+  }   else if (treatments[i]==treatments[3]) {
+    merged<-merge(merged,subset(ns_melt, n > n3),by=c("Var1","Var2"))
+  }   else if (treatments[i]==treatments[4]) {
+    merged<-merge(merged,subset(ns_melt, n > n4),by=c("Var1","Var2"))
+  }   else
+    print("Somethings wrong with your treatment designations. Please Check!!")
+  
+  if (nrow(merged) > 0) {
+    merged$trt<-treatments[i]
+    final_results<-rbind(final_results, merged)
+  }   else {
+    print("no correlations for this variable")
+  }
+  
+  print(paste("finished ",treatments[i],sep=""))
+}
+```
+
+# Taxonomy
+
+```{r}
+head(tax.clean)
+
+
+```
